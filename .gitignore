@@ -28,9 +28,11 @@ npm-debug.log*
 pnpm-debug.log*
 
 # Editors and OS
-.vscode/*
-!.vscode/extensions.json
 .idea/
 *.swp
 .DS_Store
 Thumbs.db
+branch_structure.json
+temp_auto_push.bat
+temp_interactive_push.bat
+.gitignore

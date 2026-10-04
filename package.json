@@ -1,14 +1,14 @@
 {
   "name": "ghosted",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "private": true,
   "license": "MIT",
   "type": "module",
   "packageManager": "pnpm@12.8.1",
   "scripts": {
-    "dev": "wxt",
+    "dev": "node api.js && wxt",
     "dev:firefox": "wxt -b firefox --mv3",
-    "build": "wxt build",
+    "build": "node api.js && wxt build",
     "build:firefox": "wxt build -b firefox --mv3",
     "zip": "wxt zip",
     "postinstall": "wxt prepare",
