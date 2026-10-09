@@ -2,7 +2,17 @@ import { applyPage, evaluate, isStale, needsReview, DEFAULT_THRESHOLD, type Sess
 import { diffScan } from '../core/diff';
 import type { DiffEvent, ListKind, ParsedPage, UserRecord } from '../core/types';
 import Dexie from 'dexie';
-import { AppDB, LEGACY_DB_NAME, type EventRow, type MembershipRow, type ScanRow, type UserRow } from './schema';
+import { attributeReplies, type AttributedReply } from '../core/engagement';
+import {
+  AppDB,
+  LEGACY_DB_NAME,
+  type EngagementReplyRow,
+  type EngagementTweetRow,
+  type EventRow,
+  type MembershipRow,
+  type ScanRow,
+  type UserRow,
+} from './schema';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const GONE_WINDOW_MS = 3 * DAY_MS;
@@ -353,6 +363,66 @@ export class Repo {
 
   async listScans(ownerId: string, limit = 50): Promise<ScanRow[]> {
     return (await this.db.scans.orderBy('startedAt').reverse().filter((s) => s.ownerId === ownerId).limit(limit).toArray());
+  }
+
+  // ---- engagement tweets ---------------------------------------------
+
+  async saveEngagementTweet(row: EngagementTweetRow): Promise<void> {
+    await this.db.engagementTweets.put(row);
+  }
+
+  async listEngagementTweets(ownerId: string): Promise<EngagementTweetRow[]> {
+    return this.db.engagementTweets.where('ownerId').equals(ownerId).reverse().sortBy('postedAt');
+  }
+
+  async getEngagementTweet(ownerId: string, tweetId: string): Promise<EngagementTweetRow | undefined> {
+    return this.db.engagementTweets.get([ownerId, tweetId]);
+  }
+
+  async listEngagementReplies(ownerId: string, tweetId: string): Promise<EngagementReplyRow[]> {
+    return this.db.engagementReplies.where('[ownerId+tweetId]').equals([ownerId, tweetId]).toArray();
+  }
+
+  async followerIdSet(ownerId: string): Promise<Set<string>> {
+    const rows = await this.db.membership.where('[ownerId+kind]').equals([ownerId, 'followers']).toArray();
+    return new Set(rows.map((r) => r.userId));
+  }
+
+  /** Overwrite reply rows for a tweet with a fresh attributed scan. */
+  async replaceEngagementReplies(
+    ownerId: string,
+    tweetId: string,
+    replies: AttributedReply[],
+    now: number,
+  ): Promise<void> {
+    const rows: EngagementReplyRow[] = replies.map((r) => ({
+      ownerId,
+      tweetId,
+      userId: r.userId,
+      replyTweetId: r.replyTweetId,
+      handle: r.handle,
+      name: r.name,
+      avatarUrl: r.avatarUrl,
+      status: r.status,
+    }));
+    await this.db.transaction('rw', [this.db.engagementReplies, this.db.engagementTweets], async () => {
+      await this.db.engagementReplies.where('[ownerId+tweetId]').equals([ownerId, tweetId]).delete();
+      if (rows.length) await this.db.engagementReplies.bulkPut(rows);
+      const tweet = await this.db.engagementTweets.get([ownerId, tweetId]);
+      if (tweet) await this.db.engagementTweets.put({ ...tweet, lastScannedAt: now });
+    });
+  }
+
+  async finishEngagementScan(
+    ownerId: string,
+    tweetId: string,
+    replyDrafts: Array<{ user: UserRecord; replyTweetId: string }>,
+    now: number,
+  ): Promise<AttributedReply[]> {
+    const current = await this.followerIdSet(ownerId);
+    const attributed = attributeReplies(replyDrafts, current);
+    await this.replaceEngagementReplies(ownerId, tweetId, attributed, now);
+    return attributed;
   }
 
   // ---- export / import / wipe ----------------------------------------

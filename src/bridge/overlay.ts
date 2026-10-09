@@ -1,12 +1,13 @@
-import type { ListKind } from '../core/types';
+import type { ScrollKind } from '../messages';
 import type { Outcome, Progress } from './autoscroll';
 
-const listName = (kind: ListKind) => (kind === 'followers' ? 'Followers' : 'Following');
+const listName = (kind: ScrollKind) =>
+  kind === 'followers' ? 'Followers' : kind === 'following' ? 'Following' : 'Replies';
 
 export interface DoneInfo {
-  kind: ListKind;
+  kind: ScrollKind;
   /** The list the check continues with, and roughly when its page opens (ms). */
-  next?: { kind: ListKind; inMs: number };
+  next?: { kind: ScrollKind; inMs: number };
   /** This list's first-ever check: it saved a starting point, so there are no changes yet. */
   baseline?: boolean;
 }
@@ -102,7 +103,7 @@ export class Overlay {
     document.documentElement.appendChild(this.host);
   }
 
-  update(kind: ListKind, p: Progress) {
+  update(kind: ScrollKind, p: Progress) {
     const total = p.expected ? ` of ~${p.expected}` : '';
     this.text.textContent = `${listName(kind)}: ${p.collected}${total} collected`;
     if (p.expected) this.bar.style.width = `${Math.min(100, Math.round((p.collected / p.expected) * 100))}%`;

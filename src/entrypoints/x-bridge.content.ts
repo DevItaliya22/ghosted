@@ -1,16 +1,16 @@
 import { browser } from 'wxt/browser';
 import { handleFromProfileHref } from '../core/owner';
-import type { ListKind } from '../core/types';
-import { CHANNEL, type BridgeReadyReply, type CaptureReply, type PageCapture, type ScanFinishedReply, type ToBackground } from '../messages';
+import { CHANNEL, type BridgeReadyReply, type CaptureReply, type PageCapture, type ScanFinishedReply, type ScrollKind, type ToBackground } from '../messages';
 import { AutoScroller } from '../bridge/autoscroll';
 import { PACES, asPace, type Pace } from '../core/pace';
 import { Overlay } from '../bridge/overlay';
+import { watchComposeMark } from '../bridge/compose-mark';
 
 async function send<T>(msg: ToBackground): Promise<T | undefined> {
   try {
     return (await browser.runtime.sendMessage(msg)) as T;
   } catch {
-    return undefined; // extension reloaded / background asleep: drop silently
+    return undefined;
   }
 }
 
@@ -20,7 +20,6 @@ export default defineContentScript({
   main() {
     let scroller: AutoScroller | null = null;
     let overlay: Overlay | null = null;
-    // Captures can finish (even commit a small list) before the scroller exists; keep the last one.
     let lastReply: CaptureReply | undefined;
 
     window.addEventListener('message', async (ev: MessageEvent) => {
@@ -47,13 +46,12 @@ export default defineContentScript({
       else if (attempt < 30) setTimeout(() => reportHandle(attempt + 1), 1000);
     };
 
-    const start = async (kind: ListKind, pace: Pace, step?: BridgeReadyReply['step']) => {
+    const start = async (kind: ScrollKind, pace: Pace, step?: BridgeReadyReply['step']) => {
       overlay = new Overlay(step);
       scroller = new AutoScroller(kind, {
         onProgress: (p) => overlay?.update(kind, p),
         onDone: async (outcome) => {
           scroller = null;
-          // Ask first: the panel must say whether another list follows before it says anything final.
           const reply = await send<ScanFinishedReply>({ type: 'scan-finished', kind, outcome });
           const baseline = lastReply?.kind === kind && lastReply.baseline === true;
           overlay?.done(outcome, { kind, next: reply?.next, baseline });
@@ -66,6 +64,7 @@ export default defineContentScript({
 
     const init = async () => {
       reportHandle();
+      watchComposeMark((on) => void send({ type: 'set-engagement-mark', on }));
       const reply = await send<BridgeReadyReply>({ type: 'bridge-ready', path: location.pathname });
       if (reply?.autoscroll) void start(reply.autoscroll, asPace(reply.pace), reply.step);
     };

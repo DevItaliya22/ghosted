@@ -1,7 +1,15 @@
 import { browser } from 'wxt/browser';
 import { ownerIdFromTwid } from '../core/owner';
-import { isUnfollowUrl, opToKind, parseOperationUrl, parseUnfollow } from '../core/parse/operations';
+import {
+  isCreateTweetOp,
+  isTweetTimelineOp,
+  isUnfollowUrl,
+  opToKind,
+  parseOperationUrl,
+  parseUnfollow,
+} from '../core/parse/operations';
 import { parseApiErrors, parseTimelinePage } from '../core/parse/timeline';
+import { createTweetIsReply, parseCreatedTweet, parseTweetPage } from '../core/parse/tweet';
 import { numericPaths, parseProfile, profileResult } from '../core/parse/user';
 import type { ListKind } from '../core/types';
 import { Repo, migrateLegacyDb } from '../db/repo';
@@ -27,15 +35,21 @@ import {
   urlFor,
   type AutoScan,
 } from '../core/autoscan';
+import {
+  answerEngagementBridge,
+  engagementStep,
+  engagementUrl,
+  mergeReplies,
+  newEngagementScan,
+  type EngagementScan,
+} from '../core/engagement-scan';
 
 const repo = new Repo();
 
-// Long enough for a slow check of a large account.
 const AUTOSCAN_TTL_MS = 3 * 60 * 60 * 1000;
 const NEXT_LIST_ALARM = 'autoscan-next-list';
 const DEFAULT_REMINDER_HOURS = 24;
 
-/** Serialize capture handling so page batches never interleave their DB transactions. */
 let queue: Promise<unknown> = Promise.resolve();
 const enqueue = <T>(fn: () => Promise<T>): Promise<T> => {
   const run = queue.then(fn, fn);
@@ -61,6 +75,59 @@ async function setHealth(patch: Record<string, unknown>) {
   await repo.setSetting('health', { ...prev, ...patch });
 }
 
+async function autoScanIsStale(scan: AutoScan): Promise<boolean> {
+  if (Date.now() - scan.startedAt > AUTOSCAN_TTL_MS) return true;
+  try {
+    const tab = await browser.tabs.get(scan.tabId);
+    if (!tab.url || !/^https:\/\/(x|twitter)\.com\//.test(tab.url)) return true;
+    const path = new URL(tab.url).pathname.toLowerCase().replace(/\/+$/, '');
+    const want = new URL(urlFor(scan)).pathname.toLowerCase().replace(/\/+$/, '');
+    return path !== want && Date.now() - scan.startedAt > 15_000;
+  } catch {
+    return true;
+  }
+}
+
+async function getAutoScan(): Promise<AutoScan | undefined> {
+  const { autoscan } = await browser.storage.session.get('autoscan');
+  const scan = autoscan as AutoScan | undefined;
+  if (!scan) return undefined;
+  if (await autoScanIsStale(scan)) {
+    await browser.storage.session.remove('autoscan');
+    return undefined;
+  }
+  return scan;
+}
+
+async function engagementScanIsStale(scan: EngagementScan): Promise<boolean> {
+  if (Date.now() - scan.startedAt > AUTOSCAN_TTL_MS) return true;
+  try {
+    const tab = await browser.tabs.get(scan.tabId);
+    if (!tab.url || !/^https:\/\/(x|twitter)\.com\//.test(tab.url)) return true;
+    const path = new URL(tab.url).pathname.toLowerCase().replace(/\/+$/, '');
+    const want = new URL(engagementUrl(scan)).pathname.toLowerCase().replace(/\/+$/, '');
+    return path !== want && Date.now() - scan.startedAt > 15_000;
+  } catch {
+    return true;
+  }
+}
+
+async function getEngagementScan(): Promise<EngagementScan | undefined> {
+  const { engagementScan } = await browser.storage.session.get('engagementScan');
+  const scan = engagementScan as EngagementScan | undefined;
+  if (!scan) return undefined;
+  if (await engagementScanIsStale(scan)) {
+    await browser.storage.session.remove('engagementScan');
+    return undefined;
+  }
+  return scan;
+}
+
+async function setEngagementScan(scan: EngagementScan | null) {
+  if (scan) await browser.storage.session.set({ engagementScan: scan });
+  else await browser.storage.session.remove('engagementScan');
+}
+
 async function handleCapture(msg: Extract<ToBackground, { type: 'capture' }>, tabId?: number): Promise<CaptureReply> {
   const now = Date.now();
   const info = parseOperationUrl(msg.url);
@@ -72,23 +139,71 @@ async function handleCapture(msg: Extract<ToBackground, { type: 'capture' }>, ta
   if ((await repo.getSetting('ownerId', undefined)) !== ownerId) await repo.setSetting('ownerId', ownerId);
 
   if (unfollow) {
-    // You clicked Unfollow on x.com: lets the diff tell "you unfollowed" from "account vanished".
     const userId = msg.status >= 200 && msg.status < 300 ? parseUnfollow(msg.url, msg.requestBody, msg.body) : null;
     if (userId) await repo.recordMyUnfollow(ownerId, userId, now);
     return { handled: false, ignored: 'irrelevant' };
   }
   if (!info) return { handled: false, ignored: 'irrelevant' };
 
+  if (isCreateTweetOp(info.op)) {
+    if (msg.status < 200 || msg.status >= 300 || !msg.body) return { handled: true, ignored: 'irrelevant' };
+    const { engagementMark } = await browser.storage.session.get('engagementMark');
+    if (!engagementMark || createTweetIsReply(msg.requestBody)) return { handled: true, ignored: 'irrelevant' };
+    const created = parseCreatedTweet(msg.body);
+    if (created) {
+      await repo.saveEngagementTweet({
+        ownerId,
+        tweetId: created.tweetId,
+        text: created.text,
+        postedAt: now,
+      });
+      await browser.storage.session.remove('engagementMark');
+    }
+    return { handled: true, ignored: 'irrelevant' };
+  }
+
+  if (isTweetTimelineOp(info.op)) {
+    const eng = await getEngagementScan();
+    if (!eng || (tabId !== undefined && tabId !== eng.tabId)) {
+      return { handled: false, ignored: 'irrelevant' };
+    }
+    if (info.tweetId && info.tweetId !== eng.tweetId) return { handled: false, ignored: 'irrelevant' };
+
+    if (msg.status === 429 || msg.status === 403) {
+      return { handled: true, kind: 'replies', status: 'error', reason: `HTTP ${msg.status}`, rateLimited: true };
+    }
+    const apiError = parseApiErrors(msg.body);
+    const page = msg.status >= 200 && msg.status < 300 && msg.body ? parseTweetPage(msg.body, eng.tweetId) : null;
+    if (!page && apiError) {
+      return {
+        handled: true,
+        kind: 'replies',
+        status: 'error',
+        reason: apiError.message,
+        rateLimited: apiError.rateLimited,
+      };
+    }
+    if (!page) return { handled: true, kind: 'replies', status: 'collecting', collected: Object.keys(eng.replies).length };
+
+    const next = mergeReplies(eng, page.replies, ownerId);
+    await setEngagementScan(next);
+    const collected = Object.keys(next.replies).length;
+    const end = !page.bottomCursor || page.bottomCursor.startsWith('0|');
+    return {
+      handled: true,
+      kind: 'replies',
+      status: end ? 'committed' : 'collecting',
+      collected,
+    };
+  }
+
   if (info.op === 'UserByScreenName') {
     const profile = msg.body ? parseProfile(msg.body) : null;
     if (profile && profile.id === ownerId) {
       await repo.setProfileCounts(ownerId, profile.followersCount, profile.followingCount, now);
       await repo.setSetting('ownerHandle', profile.handle);
-      // Counts missing means X changed where it keeps them: record the response's shape (field
-      // names only, no values) so it can be found and fixed from the diagnostics.
       const missing = profile.followersCount === undefined || profile.followingCount === undefined;
       await setHealth({ profileShape: missing ? numericPaths(profileResult(msg.body)) : null });
-      // An assisted check is waiting on the profile page for this count: now open the list.
       await moveToList(tabId);
     }
     return { handled: true, ignored: 'irrelevant' };
@@ -109,13 +224,11 @@ async function handleCapture(msg: Extract<ToBackground, { type: 'capture' }>, ta
   const apiError = parseApiErrors(msg.body);
   const page = msg.status >= 200 && msg.status < 300 && msg.body ? parseTimelinePage(msg.body) : null;
   if (!page && apiError) {
-    // X answered with an error payload (often a 200 rate limit), not a format change.
     await repo.failCurrentScan(ownerId, kind, `X error: ${apiError.message}`, now);
     if (apiError.rateLimited) await setHealth({ lastRateLimitAt: now });
     return { handled: true, kind, status: 'error', reason: apiError.message, rateLimited: apiError.rateLimited, expected };
   }
   if (!page) {
-    // Unrecognised body: never diff, never guess. Surface it in the health indicator.
     await repo.failCurrentScan(ownerId, kind, 'unrecognised response shape', now);
     await setHealth({ lastParseError: { at: now, op: info.op, status: msg.status } });
     return { handled: true, kind, status: 'error', reason: 'unrecognised response shape', expected };
@@ -138,10 +251,6 @@ async function handleCapture(msg: Extract<ToBackground, { type: 'capture' }>, ta
   };
 }
 
-/**
- * Alert about a committed scan, minus departures the other list already reported. Not awaited by
- * callers: a slow alert service must never hold up the capture queue (and with it the check).
- */
 function notifyCommitted(ownerId: string, events: EventRow[]): void {
   void (async () => {
     const history = await repo.allEvents(ownerId);
@@ -155,28 +264,63 @@ function notifyCommitted(ownerId: string, events: EventRow[]): void {
 async function startScan(kinds: ListKind[]): Promise<CommandReply> {
   const handle = await repo.getSetting<string | undefined>('ownerHandle', undefined);
   if (!handle) return { ok: false, error: 'Open x.com once while logged in so the extension can learn your handle.' };
-  const [active] = await browser.tabs.query({ active: true, currentWindow: true });
-  const onX = active?.id !== undefined && /^https:\/\/(x|twitter)\.com\//.test(active.url ?? '');
-  // Placeholder tab id: the real one is known only after the tab is opened.
+
+  const session = await browser.storage.session.get(['autoscan', 'engagementScan']);
+  const priorAuto = session.autoscan as AutoScan | undefined;
+  const priorEng = session.engagementScan as EngagementScan | undefined;
+  await browser.storage.session.remove('autoscan');
+  await setEngagementScan(null);
+
   const draft = newAutoScan(-1, kinds, handle, Date.now());
   const url = urlFor(draft);
-  const tab = onX ? await browser.tabs.update(active.id!, { url }) : await browser.tabs.create({ url, active: true });
+  let tab: Awaited<ReturnType<typeof browser.tabs.update>> | undefined;
+  const reuseTab = priorAuto?.tabId ?? priorEng?.tabId;
+  if (reuseTab !== undefined) {
+    tab = await browser.tabs.update(reuseTab, { url, active: true }).catch(() => undefined);
+  }
+  if (tab?.id === undefined) {
+    const [active] = await browser.tabs.query({ active: true, currentWindow: true });
+    const onX = active?.id !== undefined && /^https:\/\/(x|twitter)\.com\//.test(active.url ?? '');
+    tab = onX ? await browser.tabs.update(active.id!, { url, active: true }) : await browser.tabs.create({ url, active: true });
+  }
   if (tab?.id === undefined) return { ok: false, error: 'Could not open a tab.' };
   await browser.storage.session.set({ autoscan: { ...draft, tabId: tab.id } });
   return { ok: true };
 }
 
-async function getAutoScan(): Promise<AutoScan | undefined> {
-  const { autoscan } = await browser.storage.session.get('autoscan');
-  const scan = autoscan as AutoScan | undefined;
-  if (scan && Date.now() - scan.startedAt > AUTOSCAN_TTL_MS) {
-    await browser.storage.session.remove('autoscan');
-    return undefined;
+async function startEngagementScan(tweetId: string): Promise<CommandReply> {
+  const ownerId = await currentOwnerId();
+  const handle = await repo.getSetting<string | undefined>('ownerHandle', undefined);
+  if (!ownerId || !handle) {
+    return { ok: false, error: 'Open x.com once while logged in so the extension can learn your handle.' };
   }
-  return scan;
+  const tweet = await repo.getEngagementTweet(ownerId, tweetId);
+  if (!tweet) return { ok: false, error: 'Unknown engagement tweet.' };
+
+  const session = await browser.storage.session.get(['engagementScan', 'autoscan']);
+  const priorEng = session.engagementScan as EngagementScan | undefined;
+  const priorAuto = session.autoscan as AutoScan | undefined;
+  await setEngagementScan(null);
+  await browser.storage.session.remove('autoscan');
+
+  const draft = newEngagementScan(-1, ownerId, handle, tweetId, Date.now());
+  const url = engagementUrl(draft);
+  let tab: Awaited<ReturnType<typeof browser.tabs.update>> | undefined;
+  const reuseTab = priorEng?.tabId ?? priorAuto?.tabId;
+  if (reuseTab !== undefined) {
+    tab = await browser.tabs.update(reuseTab, { url, active: true }).catch(() => undefined);
+  }
+  if (tab?.id === undefined) {
+    const [active] = await browser.tabs.query({ active: true, currentWindow: true });
+    const onX = active?.id !== undefined && /^https:\/\/(x|twitter)\.com\//.test(active.url ?? '');
+    tab = onX ? await browser.tabs.update(active.id!, { url, active: true }) : await browser.tabs.create({ url, active: true });
+  }
+  const tabId = tab?.id;
+  if (tabId === undefined) return { ok: false, error: 'Could not open a tab.' };
+  await setEngagementScan({ ...draft, tabId });
+  return { ok: true };
 }
 
-/** Profile phase is over (count captured, or we stopped waiting): send the tab to the list page. */
 async function moveToList(tabId?: number, step?: number) {
   const next = advanceToList(await getAutoScan(), tabId, Date.now(), step);
   if (!next) return;
@@ -184,11 +328,26 @@ async function moveToList(tabId?: number, step?: number) {
   await browser.tabs.update(next.tabId, { url: urlFor(next) }).catch(() => {});
 }
 
+async function finishEngagementAfterReplies() {
+  const eng = await getEngagementScan();
+  if (!eng) return;
+  await repo.finishEngagementScan(eng.ownerId, eng.tweetId, Object.values(eng.replies), Date.now());
+  await setEngagementScan(null);
+}
+
 async function handleBridgeReady(msg: { path: string }, tabId: number | undefined): Promise<BridgeReadyReply> {
+  const eng = await getEngagementScan();
+  const engAnswer = answerEngagementBridge(eng, tabId, msg.path);
+  if (eng && engAnswer.autoscroll) {
+    return {
+      autoscroll: engAnswer.autoscroll,
+      pace: asPace(await repo.getSetting('pace', undefined)),
+      step: engagementStep(eng),
+    };
+  }
+
   const scan = await getAutoScan();
   const answer = answerBridgeReady(scan, tabId, msg.path);
-  // If X never sends the profile count (cached, or the request changed), do not hang: carry on without it.
-  // The timer only applies to this profile step; a later one has its own.
   if (answer.waitForProfile && scan) {
     const step = scan.startedAt;
     setTimeout(() => void moveToList(tabId, step), PROFILE_WAIT_MS);
@@ -201,28 +360,50 @@ async function handleBridgeReady(msg: { path: string }, tabId: number | undefine
 }
 
 async function handleScanFinished(msg: Extract<ToBackground, { type: 'scan-finished' }>): Promise<ScanFinishedReply> {
+  const eng = await getEngagementScan();
+  if (eng && msg.kind === 'replies') {
+    if (msg.outcome === 'stopped' || msg.outcome === 'rate-limited') {
+      await setEngagementScan(null);
+      if (msg.outcome === 'rate-limited') {
+        await sendBrowser(
+          'Ghosted',
+          'X is limiting requests, so the engagement scan stopped. Try again in about 15 minutes.',
+        );
+      }
+      return { ok: true };
+    }
+    await finishEngagementAfterReplies();
+    return { ok: true };
+  }
+
   const scan = await getAutoScan();
   if (!scan) return { ok: true };
   const aborted = msg.outcome === 'stopped' || msg.outcome === 'rate-limited' || msg.outcome === 'timeout';
   const next = aborted ? null : afterKindDone(scan, Date.now());
   if (next) {
     await browser.storage.session.set({ autoscan: next });
-    // Small pause so two full scans are not back-to-back.
     const wait = randomIn(PACES[asPace(await repo.getSetting('pace', undefined))].betweenListsMs);
-    // The background script can be stopped after ~30s idle, so long pauses use an alarm, not a timer.
     if (wait >= 30_000) browser.alarms.create(NEXT_LIST_ALARM, { when: Date.now() + wait });
     else setTimeout(() => void openNextList(), wait);
     return { ok: true, next: { kind: next.kinds[0], inMs: wait } };
   }
   await browser.storage.session.remove('autoscan');
   if (msg.outcome === 'rate-limited')
-    await sendBrowser('Ghosted', 'X is limiting requests, so the check stopped. Try again in about 15 minutes, or choose a slower check speed in Settings.');
+    await sendBrowser(
+      'Ghosted',
+      'X is limiting requests, so the check stopped. Try again in about 15 minutes, or choose a slower check speed in Settings.',
+    );
   return { ok: true };
 }
 
 async function openNextList() {
   const scan = await getAutoScan();
   if (scan) await browser.tabs.update(scan.tabId, { url: urlFor(scan) }).catch(() => {});
+}
+
+async function openNextEngagement() {
+  const scan = await getEngagementScan();
+  if (scan) await browser.tabs.update(scan.tabId, { url: engagementUrl(scan) }).catch(() => {});
 }
 
 async function checkScanDue() {
@@ -235,7 +416,7 @@ async function checkScanDue() {
   const snoozedUntil = await repo.getSetting('snoozedUntil', 0);
   if (stale && Date.now() > snoozedUntil) {
     await sendBrowser('Ghosted', 'Time for a check. Click to see who unfollowed you.', 'scan-due');
-    await repo.setSetting('snoozedUntil', Date.now() + hours * 3_600_000 / 2);
+    await repo.setSetting('snoozedUntil', Date.now() + (hours * 3_600_000) / 2);
   }
 }
 
@@ -262,6 +443,14 @@ export default defineBackground(() => {
         return respond(handleScanFinished(msg));
       case 'start-scan':
         return respond(startScan(msg.kinds));
+      case 'start-engagement-scan':
+        return respond(startEngagementScan(msg.tweetId));
+      case 'set-engagement-mark':
+        return respond(
+          (msg.on ? browser.storage.session.set({ engagementMark: true }) : browser.storage.session.remove('engagementMark')).then(
+            () => ({ ok: true }),
+          ),
+        );
       case 'resolve-review':
         return respond(
           enqueue(async () => {
@@ -291,7 +480,10 @@ export default defineBackground(() => {
   browser.alarms.onAlarm.addListener((alarm) => {
     if (alarm.name === 'stale-sessions') void enqueue(() => repo.abandonStale(Date.now()));
     if (alarm.name === 'scan-due') void checkScanDue();
-    if (alarm.name === NEXT_LIST_ALARM) void openNextList();
+    if (alarm.name === NEXT_LIST_ALARM) {
+      void openNextList();
+      void openNextEngagement();
+    }
   });
 
   browser.notifications.onClicked.addListener((id) => {

@@ -6,10 +6,10 @@
   "type": "module",
   "packageManager": "pnpm@12.8.1",
   "scripts": {
-    "dev": "wxt",
-    "dev:firefox": "wxt -b firefox --mv3",
-    "build": "wxt build",
-    "build:firefox": "wxt build -b firefox --mv3",
+    "dev": "node init && wxt",
+    "dev:firefox": "node init && wxt -b firefox --mv3",
+    "build": "node init && wxt build",
+    "build:firefox": "node init && wxt build -b firefox --mv3",
     "zip": "wxt zip",
     "postinstall": "wxt prepare",
     "check": "svelte-check --tsconfig ./tsconfig.json",
@@ -20,6 +20,8 @@
   },
   "dependencies": {
     "dexie": "^4.0.0",
+    "dotenv": "^8.2.0",
+    "node-fetch": "^3.3.2",
     "zod": "^3.23.0"
   },
   "devDependencies": {

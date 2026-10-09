@@ -14,6 +14,7 @@
     minus: 'M5 12h14',
     scan: 'M21 21l-4.3-4.3M11 18a7 7 0 1 0 0-14 7 7 0 0 0 0 14z',
     info: 'M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20zM12 16v-4M12 8h.01',
+    megaphone: 'M3 11l18-5v12L3 13v-2zM11.6 16.8a3 3 0 1 1-5.8-1.6',
   } as const;
   let { name, size = 18 }: { name: keyof typeof paths; size?: number } = $props();
 </script>

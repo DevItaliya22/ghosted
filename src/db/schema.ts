@@ -67,6 +67,27 @@ export interface SettingRow {
   value: unknown;
 }
 
+export type EngagementReplyStatus = 'followed' | 'replied_only' | 'already_following';
+
+export interface EngagementTweetRow {
+  ownerId: string;
+  tweetId: string;
+  text?: string;
+  postedAt: number;
+  lastScannedAt?: number;
+}
+
+export interface EngagementReplyRow {
+  ownerId: string;
+  tweetId: string;
+  userId: string;
+  replyTweetId?: string;
+  handle: string;
+  name: string;
+  avatarUrl?: string;
+  status: EngagementReplyStatus;
+}
+
 export const DB_NAME = 'ghosted';
 /** Database name used before the rename; migrated once by `migrateLegacyDb`. */
 export const LEGACY_DB_NAME = 'x-unfollowers';
@@ -78,6 +99,8 @@ export class AppDB extends Dexie {
   membership!: Table<MembershipRow, [string, string, string]>;
   events!: Table<EventRow, number>;
   settings!: Table<SettingRow, string>;
+  engagementTweets!: Table<EngagementTweetRow, [string, string]>;
+  engagementReplies!: Table<EngagementReplyRow, [string, string, string]>;
 
   constructor(name = DB_NAME) {
     super(name);
@@ -88,6 +111,10 @@ export class AppDB extends Dexie {
       membership: '[ownerId+kind+userId], [ownerId+kind]',
       events: '++id, [ownerId+at], [ownerId+type], userId, scanId',
       settings: 'key',
+    });
+    this.version(2).stores({
+      engagementTweets: '[ownerId+tweetId], ownerId, postedAt',
+      engagementReplies: '[ownerId+tweetId+userId], [ownerId+tweetId]',
     });
   }
 }

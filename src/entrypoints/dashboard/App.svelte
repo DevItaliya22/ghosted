@@ -11,8 +11,10 @@
   import Boomerangs from './Boomerangs.svelte';
   import Scans from './Scans.svelte';
   import Settings from './Settings.svelte';
+  import Engagement from './Engagement.svelte';
+  import EngagementDetail from './EngagementDetail.svelte';
 
-  type Tab = 'overview' | 'timeline' | 'not-following-back' | 'fans' | 'mutuals' | 'boomerangs' | 'scans' | 'settings';
+  type Tab = 'overview' | 'timeline' | 'not-following-back' | 'fans' | 'mutuals' | 'boomerangs' | 'engagement' | 'scans' | 'settings';
   const tabs: Array<[Tab, string, ComponentProps<typeof Icon>['name']]> = [
     ['overview', 'Overview', 'overview'],
     ['timeline', 'Timeline', 'timeline'],
@@ -20,24 +22,42 @@
     ['fans', 'Fans', 'users'],
     ['mutuals', 'Mutuals', 'heart'],
     ['boomerangs', 'Boomerangs', 'repeat'],
+    ['engagement', 'Engagement', 'megaphone'],
     ['scans', 'Scans', 'scans'],
     ['settings', 'Settings', 'settings'],
   ];
   const isTab = (t: string): t is Tab => tabs.some(([id]) => id === t);
-  let tab = $state<Tab>(isTab(location.hash.slice(1)) ? (location.hash.slice(1) as Tab) : 'overview');
+
+  function parseHash(raw: string): { tab: Tab; tweetId?: string } {
+    const h = raw.replace(/^#/, '');
+    if (h.startsWith('engagement/')) {
+      const tweetId = h.slice('engagement/'.length);
+      if (tweetId) return { tab: 'engagement', tweetId };
+    }
+    return { tab: isTab(h) ? h : 'overview' };
+  }
+
+  let route = $state(parseHash(location.hash));
   $effect(() => {
-    if (location.hash.slice(1) !== tab) location.hash = tab;
+    const want = route.tweetId ? `engagement/${route.tweetId}` : route.tab;
+    if (location.hash.slice(1) !== want) location.hash = want;
   });
   $effect(() => {
     const onHash = () => {
-      const h = location.hash.slice(1);
-      if (isTab(h) && h !== tab) tab = h;
+      const next = parseHash(location.hash);
+      if (next.tab !== route.tab || next.tweetId !== route.tweetId) route = next;
     };
     window.addEventListener('hashchange', onHash);
     return () => window.removeEventListener('hashchange', onHash);
   });
   const go = (t: string) => {
-    if (isTab(t)) tab = t;
+    if (isTab(t)) route = { tab: t };
+  };
+  const goTweet = (id: string) => {
+    route = { tab: 'engagement', tweetId: id };
+  };
+  const goEngagement = () => {
+    route = { tab: 'engagement' };
   };
 
   const owner = liveQuery(async () => {
@@ -62,7 +82,7 @@
     {/if}
     <div class="links">
       {#each tabs as [id, label, icon]}
-        <button class:active={tab === id} onclick={() => (tab = id)} aria-current={tab === id ? 'page' : undefined}>
+        <button class:active={route.tab === id} onclick={() => go(id)} aria-current={route.tab === id ? 'page' : undefined}>
           <Icon name={icon} size={17} /><span>{label}</span>
         </button>
       {/each}
@@ -80,22 +100,26 @@
   <main>
     {#if !$owner}
       <!-- loading -->
-    {:else if !$owner.ownerId && tab !== 'settings'}
+    {:else if !$owner.ownerId && route.tab !== 'settings'}
       <div class="card onboard">
         <h2>Let's get you set up</h2>
         <p class="muted">No X account detected yet. The setup guide walks you through it in under a minute.</p>
         <button class="primary" onclick={() => browser.tabs.create({ url: browser.runtime.getURL('/welcome.html') })}>Open setup guide</button>
       </div>
-    {:else if tab === 'settings'}
+    {:else if route.tab === 'settings'}
       <Settings ownerId={$owner.ownerId} />
     {:else if $owner.ownerId}
-      {#if tab === 'overview'}<Overview ownerId={$owner.ownerId} {go} />
-      {:else if tab === 'timeline'}<Timeline ownerId={$owner.ownerId} />
-      {:else if tab === 'not-following-back'}<Lists ownerId={$owner.ownerId} mode="not-following-back" />
-      {:else if tab === 'fans'}<Lists ownerId={$owner.ownerId} mode="fans" />
-      {:else if tab === 'mutuals'}<Lists ownerId={$owner.ownerId} mode="mutuals" />
-      {:else if tab === 'boomerangs'}<Boomerangs ownerId={$owner.ownerId} />
-      {:else if tab === 'scans'}<Scans ownerId={$owner.ownerId} />{/if}
+      {#if route.tab === 'overview'}<Overview ownerId={$owner.ownerId} {go} />
+      {:else if route.tab === 'timeline'}<Timeline ownerId={$owner.ownerId} />
+      {:else if route.tab === 'not-following-back'}<Lists ownerId={$owner.ownerId} mode="not-following-back" />
+      {:else if route.tab === 'fans'}<Lists ownerId={$owner.ownerId} mode="fans" />
+      {:else if route.tab === 'mutuals'}<Lists ownerId={$owner.ownerId} mode="mutuals" />
+      {:else if route.tab === 'boomerangs'}<Boomerangs ownerId={$owner.ownerId} />
+      {:else if route.tab === 'engagement' && route.tweetId}
+        <EngagementDetail ownerId={$owner.ownerId} tweetId={route.tweetId} goBack={goEngagement} />
+      {:else if route.tab === 'engagement'}
+        <Engagement ownerId={$owner.ownerId} {goTweet} />
+      {:else if route.tab === 'scans'}<Scans ownerId={$owner.ownerId} />{/if}
     {/if}
   </main>
 </div>

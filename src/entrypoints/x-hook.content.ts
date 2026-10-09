@@ -1,12 +1,11 @@
 import { CHANNEL, type PageCapture } from '../messages';
 
 const MATCH =
-  /\/i\/api\/graphql\/[^/]+\/(Following|Followers|UserByScreenName)(?:[/?]|$)|\/i\/api\/1\.1\/friendships\/destroy\.json/;
+  /\/i\/api\/graphql\/[^/]+\/(Following|Followers|UserByScreenName|CreateTweet|TweetDetail|TweetResultByRestId|SearchTimeline|ConversationTimeline)(?:[/?]|$)|\/i\/api\/1\.1\/friendships\/destroy\.json/;
 
 /**
- * Runs in the page's own JS world. It only OBSERVES responses X's web app already fetches (the
- * followers / following lists, your profile, and your own unfollow clicks); it never issues
- * requests and never reads or stores auth headers.
+ * Runs in the page's own JS world. It only OBSERVES responses X's web app already fetches; it never
+ * issues requests and never reads or stores auth headers.
  */
 export default defineContentScript({
   matches: ['https://x.com/*', 'https://twitter.com/*'],

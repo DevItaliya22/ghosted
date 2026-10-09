@@ -2,6 +2,7 @@ import { defineConfig } from 'wxt';
 
 export default defineConfig({
   srcDir: 'src',
+  outDir: 'output',
   modules: ['@wxt-dev/module-svelte'],
   manifest: {
     name: 'Ghosted — Unfollower Tracker for X',

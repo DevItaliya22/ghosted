@@ -2,6 +2,7 @@
 node_modules/
 
 # Build output (unpacked builds, store zips) and WXT's generated files
+output/
 .output/
 .wxt/
 web-ext-artifacts/
@@ -11,8 +12,6 @@ web-ext-artifacts/
 
 # Signing keys and secrets: never commit these
 *.pem
-.env
-.env.*
 !.env.example
 .amo-upload-uuid
 
@@ -28,9 +27,9 @@ npm-debug.log*
 pnpm-debug.log*
 
 # Editors and OS
-.vscode/*
 !.vscode/extensions.json
 .idea/
 *.swp
 .DS_Store
 Thumbs.db
+config.bat

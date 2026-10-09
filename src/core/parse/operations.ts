@@ -1,8 +1,19 @@
 import type { ListKind } from '../types';
 
-export type OperationName = 'Following' | 'Followers' | 'BlueVerifiedFollowers' | 'UserByScreenName';
+export type OperationName =
+  | 'Following'
+  | 'Followers'
+  | 'BlueVerifiedFollowers'
+  | 'UserByScreenName'
+  | 'CreateTweet'
+  | 'TweetDetail'
+  | 'TweetResultByRestId'
+  | 'SearchTimeline'
+  | 'ConversationTimeline';
 
-const OPERATIONS = new Set<string>(['Following', 'Followers', 'BlueVerifiedFollowers', 'UserByScreenName']);
+const LIST_OPS = new Set(['Following', 'Followers', 'BlueVerifiedFollowers', 'UserByScreenName']);
+const TWEET_OPS = new Set(['CreateTweet', 'TweetDetail', 'TweetResultByRestId', 'SearchTimeline', 'ConversationTimeline']);
+const OPERATIONS = new Set([...LIST_OPS, ...TWEET_OPS]);
 const GRAPHQL_RE = /\/i\/api\/graphql\/[^/]+\/([A-Za-z]+)/;
 
 export interface OperationInfo {
@@ -10,7 +21,13 @@ export interface OperationInfo {
   userId?: string;
   screenName?: string;
   cursor?: string;
+  tweetId?: string;
 }
+
+export const isTweetTimelineOp = (op: OperationName) =>
+  op === 'TweetDetail' || op === 'TweetResultByRestId' || op === 'SearchTimeline' || op === 'ConversationTimeline';
+
+export const isCreateTweetOp = (op: OperationName) => op === 'CreateTweet';
 
 /** Identify a captured request. Returns null for anything we do not care about. */
 export function parseOperationUrl(url: string): OperationInfo | null {
@@ -38,6 +55,7 @@ export function parseOperationUrl(url: string): OperationInfo | null {
     userId: str(vars.userId),
     screenName: str(vars.screen_name),
     cursor: str(vars.cursor),
+    tweetId: str(vars.focalTweetId) ?? str(vars.tweetId),
   };
 }
 

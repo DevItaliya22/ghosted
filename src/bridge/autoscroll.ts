@@ -1,5 +1,4 @@
-import type { ListKind } from '../core/types';
-import type { CaptureReply } from '../messages';
+import type { CaptureReply, ScrollKind } from '../messages';
 import { PACES, randomIn, type PaceConfig } from '../core/pace';
 
 export interface Progress {
@@ -14,6 +13,8 @@ const NO_PROGRESS_LIMIT_MS = 3 * 60 * 1000;
 /** How long to wait for X to answer after reaching the bottom. */
 const CAPTURE_TIMEOUT_MS = 4000;
 const NUDGE_AFTER_MS = 8000;
+/** Reply threads: finish sooner when scrolling stops yielding new people. */
+const REPLIES_IDLE_MS = 20_000;
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
@@ -33,7 +34,7 @@ export class AutoScroller {
   private finished: Outcome | null = null;
 
   constructor(
-    private kind: ListKind,
+    private kind: ScrollKind,
     private cb: { onProgress: (p: Progress) => void; onDone: (o: Outcome) => void },
     private pace: PaceConfig = PACES.normal,
   ) {}
@@ -57,6 +58,10 @@ export class AutoScroller {
     if (reply.status === 'committed' || reply.status === 'needs_review') return this.finish('complete');
     if (reply.status === 'invalid' || reply.status === 'error') return this.finish('invalid');
     this.waiter?.();
+  }
+
+  private idleLimit() {
+    return this.kind === 'replies' ? REPLIES_IDLE_MS : NO_PROGRESS_LIMIT_MS;
   }
 
   /** `replay`: the last capture seen before the scroller existed (it may already be final). */
@@ -95,7 +100,7 @@ export class AutoScroller {
         continue;
       }
       const idleFor = Date.now() - this.lastProgressAt;
-      if (idleFor > NO_PROGRESS_LIMIT_MS) return this.finish('timeout');
+      if (idleFor > this.idleLimit()) return this.finish(this.kind === 'replies' && this.lastCollected >= 0 ? 'complete' : 'timeout');
       // If nothing new has loaded for a while, move up a screen first so X's lazy loader re-fires.
       if (idleFor > NUDGE_AFTER_MS) {
         window.scrollBy({ top: -window.innerHeight });
