@@ -11,8 +11,6 @@ web-ext-artifacts/
 
 # Signing keys and secrets: never commit these
 *.pem
-.env
-.env.*
 !.env.example
 .amo-upload-uuid
 
@@ -36,3 +34,4 @@ branch_structure.json
 temp_auto_push.bat
 temp_interactive_push.bat
 .gitignore
+config.bat
